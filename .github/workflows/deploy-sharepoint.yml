@@ -1,0 +1,272 @@
+name: Deploy SharePoint Workflow to n8n
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+    paths:
+      - 'workflows/sharepoint/**'
+  
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+          - dev
+      activate:
+        description: 'Activate workflow after deployment'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Determine deployment environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual trigger - use input parameters
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "activate=${{ github.event.inputs.activate }}" >> $GITHUB_OUTPUT
+          else
+            # Automatic trigger - determine from branch
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "environment=production" >> $GITHUB_OUTPUT
+              echo "activate=true" >> $GITHUB_OUTPUT
+            elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+              echo "environment=staging" >> $GITHUB_OUTPUT
+              echo "activate=true" >> $GITHUB_OUTPUT
+            else
+              echo "environment=dev" >> $GITHUB_OUTPUT
+              echo "activate=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+      
+      - name: Set n8n instance URL
+        id: n8n
+        run: |
+          case "${{ steps.env.outputs.environment }}" in
+            production)
+              echo "url=${{ secrets.N8N_PROD_URL }}" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "url=${{ secrets.N8N_STAGING_URL }}" >> $GITHUB_OUTPUT
+              ;;
+            dev)
+              echo "url=${{ secrets.N8N_DEV_URL }}" >> $GITHUB_OUTPUT
+              ;;
+          esac
+      
+      - name: Get workflow file
+        id: workflow
+        run: |
+          # Use environment-specific workflow file if it exists
+          workflow_file="workflows/sharepoint/Get_SharePoint_AI_POC_Files_${{ steps.env.outputs.environment }}.json"
+          
+          if [[ ! -f "$workflow_file" ]]; then
+            # Fallback to versioned file
+            workflow_file="workflows/sharepoint/Get_SharePoint_AI_POC_Files_v1.json"
+          fi
+          
+          echo "file=$workflow_file" >> $GITHUB_OUTPUT
+          echo "Using workflow file: $workflow_file"
+      
+      - name: Deploy SharePoint workflow to n8n
+        id: deploy
+        run: |
+          echo "🚀 Deploying SharePoint workflow to ${{ steps.env.outputs.environment }}..."
+          
+          response=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "gitRepoUrl": "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/${{ steps.workflow.outputs.file }}",
+              "n8nInstanceUrl": "${{ steps.n8n.outputs.url }}",
+              "environment": "${{ steps.env.outputs.environment }}",
+              "activateWorkflow": ${{ steps.env.outputs.activate }},
+              "updateCredentials": false
+            }')
+          
+          # Extract HTTP status code and response body
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "HTTP Status: $http_code"
+          echo "Response: $body"
+          
+          # Save response for next steps
+          echo "$body" > deployment-response.json
+          
+          # Check if deployment was successful
+          if [[ "$http_code" -ge 200 ]] && [[ "$http_code" -lt 300 ]]; then
+            if echo "$body" | grep -q '"status":"success"'; then
+              echo "✅ Deployment successful!"
+              
+              # Extract workflow ID
+              workflow_id=$(echo "$body" | grep -o '"workflowId":"[^"]*"' | cut -d'"' -f4)
+              echo "workflow_id=$workflow_id" >> $GITHUB_OUTPUT
+              
+              exit 0
+            else
+              echo "❌ Deployment failed! Response indicates error."
+              exit 1
+            fi
+          else
+            echo "❌ Deployment failed! HTTP status: $http_code"
+            exit 1
+          fi
+      
+      - name: Extract deployment details
+        if: success()
+        id: details
+        run: |
+          workflow_name=$(jq -r '.workflowName' deployment-response.json)
+          workflow_id=$(jq -r '.workflowId' deployment-response.json)
+          action=$(jq -r '.action' deployment-response.json)
+          activated=$(jq -r '.activated' deployment-response.json)
+          
+          echo "workflow_name=$workflow_name" >> $GITHUB_OUTPUT
+          echo "workflow_id=$workflow_id" >> $GITHUB_OUTPUT
+          echo "action=$action" >> $GITHUB_OUTPUT
+          echo "activated=$activated" >> $GITHUB_OUTPUT
+      
+      - name: Create deployment summary
+        if: success()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🚀 SharePoint Workflow Deployment Success
+          
+          ### Deployment Details
+          - **Environment**: \`${{ steps.env.outputs.environment }}\`
+          - **Workflow Name**: ${{ steps.details.outputs.workflow_name }}
+          - **Workflow ID**: \`${{ steps.details.outputs.workflow_id }}\`
+          - **Action**: ${{ steps.details.outputs.action }}
+          - **Status**: ${{ steps.details.outputs.activated == 'true' && '✅ Active' || '⏸️ Inactive' }}
+          - **Deployed At**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Deployed By**: ${{ github.actor }}
+          - **Commit**: \`${{ github.sha }}\`
+          
+          ### n8n Instance
+          - **URL**: ${{ steps.n8n.outputs.url }}
+          - **Direct Link**: ${{ steps.n8n.outputs.url }}/workflow/${{ steps.details.outputs.workflow_id }}
+          
+          ### Repository Info
+          - **Branch**: ${{ github.ref_name }}
+          - **Workflow File**: ${{ steps.workflow.outputs.file }}
+          - **Commit Message**: ${{ github.event.head_commit.message }}
+          
+          ---
+          
+          ⚠️ **Important**: Ensure Microsoft Graph OAuth credentials are configured in the n8n instance.
+          EOF
+      
+      - name: Comment on PR (if applicable)
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚀 SharePoint Workflow Deployment Preview
+              
+              Workflow successfully deployed to **${{ steps.env.outputs.environment }}** environment!
+              
+              - **Workflow**: ${{ steps.details.outputs.workflow_name }}
+              - **Action**: ${{ steps.details.outputs.action }}
+              - **Status**: ${{ steps.details.outputs.activated == 'true' ? '✅ Active' : '⏸️ Inactive' }}
+              - **n8n URL**: ${{ steps.n8n.outputs.url }}/workflow/${{ steps.details.outputs.workflow_id }}
+              `
+            })
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ❌ SharePoint Workflow Deployment Failed
+          
+          ### Deployment Details
+          - **Environment**: \`${{ steps.env.outputs.environment }}\`
+          - **Branch**: ${{ github.ref_name }}
+          - **Workflow File**: ${{ steps.workflow.outputs.file }}
+          - **Deployed By**: ${{ github.actor }}
+          - **Failed At**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ### Troubleshooting Steps
+          1. Check n8n webhook URL in GitHub secrets
+          2. Verify n8n API credentials are valid
+          3. Ensure workflow JSON syntax is correct
+          4. Check n8n instance is accessible
+          5. Review deployment response above for error details
+          
+          ### Need Help?
+          - Check the [Deployment Guide](../SHAREPOINT-DEPLOYMENT-GUIDE.md)
+          - Review n8n execution logs
+          - Verify GitHub Actions secrets are configured
+          EOF
+          
+          exit 1
+
+  # Optional: Run tests before deploying to production
+  test:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Validate workflow JSON
+        run: |
+          echo "🧪 Validating workflow JSON structure..."
+          
+          workflow_file="workflows/sharepoint/Get_SharePoint_AI_POC_Files_v1.json"
+          
+          # Check if file exists
+          if [[ ! -f "$workflow_file" ]]; then
+            echo "❌ Workflow file not found: $workflow_file"
+            exit 1
+          fi
+          
+          # Validate JSON syntax
+          if ! jq empty "$workflow_file" 2>/dev/null; then
+            echo "❌ Invalid JSON syntax in workflow file"
+            exit 1
+          fi
+          
+          # Check required fields
+          if ! jq -e '.nodes' "$workflow_file" > /dev/null; then
+            echo "❌ Workflow missing 'nodes' property"
+            exit 1
+          fi
+          
+          if ! jq -e '.connections' "$workflow_file" > /dev/null; then
+            echo "❌ Workflow missing 'connections' property"
+            exit 1
+          fi
+          
+          node_count=$(jq '.nodes | length' "$workflow_file")
+          echo "✅ Workflow validation passed! ($node_count nodes)"
+      
+      - name: Check for required credentials
+        run: |
+          echo "🔐 Checking for OAuth credentials..."
+          
+          workflow_file="workflows/sharepoint/Get_SharePoint_AI_POC_Files_v1.json"
+          
+          # Check if workflow uses OAuth credentials
+          if jq -e '.nodes[].credentials.oAuth2Api' "$workflow_file" > /dev/null; then
+            echo "⚠️  Workflow requires OAuth2 credentials"
+            echo "⚠️  Ensure 'Thien MSGraph' credential is configured in target n8n instance"
+          fi
