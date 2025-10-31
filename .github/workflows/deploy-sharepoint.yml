@@ -186,7 +186,7 @@ jobs:
               
               - **Workflow**: ${{ steps.details.outputs.workflow_name }}
               - **Action**: ${{ steps.details.outputs.action }}
-              - **Status**: ${{ steps.details.outputs.activated == 'true' ? '✅ Active' : '⏸️ Inactive' }}
+              - **Status**: ${{ steps.details.outputs.activated == 'true' && '✅ Active' || '⏸️ Inactive' }}
               - **n8n URL**: ${{ steps.n8n.outputs.url }}/workflow/${{ steps.details.outputs.workflow_id }}
               `
             })
