@@ -1,0 +1,71 @@
+{
+  "name": "Get SharePoint AI POC Files",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "={{ $json.value[0]['@microsoft.graph.downloadUrl'] }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "name": "Download zip File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        96,
+        -112
+      ],
+      "id": "0b1fb1c5-8b65-4beb-ab17-6abfa70d4c2d"
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/sites/63f58ff2-b9b5-426d-9f7a-c05be6d1c005,91b76c4a-dc0f-4c61-8ef1-e6fe965cd69d/drive/root:/AI%20POC:/children",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -288,
+        -112
+      ],
+      "id": "3b77b6d1-92bf-4edc-b2b6-623e5c66a731",
+      "name": "HTTP Request",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "5DbkEWMjY73QfxBB",
+          "name": "Thien MSGraph"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Download zip File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "30ff4440-cd0b-45f8-b66e-55e621814200",
+  "meta": {
+    "instanceId": "fba2bd9a97d970f40140f9cf97828d82a164d7bfe31aba66a06324aa96cce6e1"
+  },
+  "id": "3s8dcI3yD7hM6Nd8",
+  "tags": []
+}
